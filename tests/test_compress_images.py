@@ -141,3 +141,20 @@ def test_main_dry_run_creates_no_files(
     assert ci.main() == 0
     out_root = sample_tree.parent / f"{sample_tree.name}_compressed"
     assert not out_root.exists()
+
+
+def test_main_skips_broken_images(
+    broken_image_tree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr("sys.argv", ["compress_images.py", str(broken_image_tree)])
+    assert ci.main() == 0
+
+    out_root = broken_image_tree.parent / f"{broken_image_tree.name}_compressed"
+    assert (out_root / "good.jpg").exists()
+    assert not (out_root / "bad.jpg").exists()
+
+    captured = capsys.readouterr().out
+    assert "Processed: 1 files" in captured
+    assert "Skipped:   1 files" in captured
