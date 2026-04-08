@@ -1,4 +1,6 @@
 """Tests for compress_images.py."""
+import subprocess
+import sys as _sys
 from pathlib import Path
 
 import pytest
@@ -176,3 +178,23 @@ def test_main_returns_error_for_invalid_quality(
         ["compress_images.py", str(sample_tree), "-q", "150"],
     )
     assert ci.main() == 1
+
+
+def test_cli_smoke_via_subprocess(sample_tree: Path, tmp_path: Path) -> None:
+    out_dir = tmp_path / "smoke_out"
+    result = subprocess.run(
+        [
+            _sys.executable,
+            "compress_images.py",
+            str(sample_tree),
+            "-o",
+            str(out_dir),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (out_dir / "a.jpg").exists()
+    assert (out_dir / "sub" / "c.png").exists()
+    assert "Processed" in result.stdout
