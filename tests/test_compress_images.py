@@ -98,3 +98,46 @@ def test_compress_one_preserves_jpeg_exif(tmp_path: Path) -> None:
 
     with Image.open(dst) as out_img:
         assert out_img.info.get("exif"), "EXIF should be preserved"
+
+
+def test_main_compresses_tree_to_default_output(
+    sample_tree: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("sys.argv", ["compress_images.py", str(sample_tree)])
+    exit_code = ci.main()
+    assert exit_code == 0
+
+    out_root = sample_tree.parent / f"{sample_tree.name}_compressed"
+    assert (out_root / "a.jpg").exists()
+    assert (out_root / "b.jpeg").exists()
+    assert (out_root / "sub" / "c.png").exists()
+    assert (out_root / "sub" / "deep" / "d.webp").exists()
+    # unsupported file must NOT be copied
+    assert not (out_root / "notes.txt").exists()
+
+    captured = capsys.readouterr().out
+    assert "Processed" in captured
+
+
+def test_main_respects_custom_output_dir(
+    sample_tree: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out_dir = tmp_path / "custom_out"
+    monkeypatch.setattr(
+        "sys.argv",
+        ["compress_images.py", str(sample_tree), "-o", str(out_dir)],
+    )
+    assert ci.main() == 0
+    assert (out_dir / "a.jpg").exists()
+
+
+def test_main_dry_run_creates_no_files(
+    sample_tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        ["compress_images.py", str(sample_tree), "--dry-run"],
+    )
+    assert ci.main() == 0
+    out_root = sample_tree.parent / f"{sample_tree.name}_compressed"
+    assert not out_root.exists()
