@@ -60,3 +60,41 @@ def test_compress_one_preserves_dimensions(tmp_path: Path) -> None:
     ci.compress_one(src, dst, quality=85, png_optimize=True)
     with Image.open(dst) as out_img:
         assert out_img.size == (640, 480)
+
+
+def test_compress_one_png_writes_output(tmp_path: Path) -> None:
+    src = tmp_path / "a.png"
+    Image.new("RGBA", (300, 200), (50, 150, 200, 255)).save(src, "PNG")
+    dst = tmp_path / "out" / "a.png"
+    dst.parent.mkdir()
+    original_size, new_size = ci.compress_one(src, dst, quality=85, png_optimize=True)
+    assert dst.exists()
+    assert new_size > 0
+    with Image.open(dst) as out_img:
+        assert out_img.size == (300, 200)
+
+
+def test_compress_one_webp_writes_output(tmp_path: Path) -> None:
+    src = tmp_path / "a.webp"
+    Image.new("RGB", (500, 400), (100, 200, 100)).save(src, "WEBP", quality=100)
+    dst = tmp_path / "out" / "a.webp"
+    dst.parent.mkdir()
+    _, new_size = ci.compress_one(src, dst, quality=85, png_optimize=True)
+    assert dst.exists()
+    assert new_size > 0
+
+
+def test_compress_one_preserves_jpeg_exif(tmp_path: Path) -> None:
+    piexif = pytest.importorskip("piexif")
+    src = tmp_path / "a.jpg"
+    Image.new("RGB", (200, 200), (10, 20, 30)).save(src, "JPEG", quality=100)
+    exif_dict = {"0th": {piexif.ImageIFD.Make: b"TestCam"}}
+    exif_bytes = piexif.dump(exif_dict)
+    Image.open(src).save(src, "JPEG", exif=exif_bytes, quality=100)
+
+    dst = tmp_path / "out" / "a.jpg"
+    dst.parent.mkdir()
+    ci.compress_one(src, dst, quality=85, png_optimize=True)
+
+    with Image.open(dst) as out_img:
+        assert out_img.info.get("exif"), "EXIF should be preserved"
