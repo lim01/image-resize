@@ -158,3 +158,21 @@ def test_main_skips_broken_images(
     captured = capsys.readouterr().out
     assert "Processed: 1 files" in captured
     assert "Skipped:   1 files" in captured
+
+
+def test_main_returns_error_for_missing_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    nonexistent = tmp_path / "nope"
+    monkeypatch.setattr("sys.argv", ["compress_images.py", str(nonexistent)])
+    assert ci.main() == 1
+
+
+def test_main_returns_error_for_invalid_quality(
+    sample_tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        ["compress_images.py", str(sample_tree), "-q", "150"],
+    )
+    assert ci.main() == 1
