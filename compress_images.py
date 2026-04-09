@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import logging
 import shutil
 import sys
@@ -26,6 +27,19 @@ def mirror_path(src: Path, in_root: Path, out_root: Path) -> Path:
     """Compute the destination path under `out_root` mirroring `src`'s relative location."""
     relative = src.relative_to(in_root)
     return out_root / relative
+
+
+def is_already_processed(path: Path) -> bool:
+    """True if `path` looks like it has already been compressed by this tool.
+
+    A file is considered already processed if either:
+    - its stem ends with ``_origin`` (it IS a backup), or
+    - a sibling ``<stem>_origin<ext>`` backup file already exists next to it.
+    """
+    if path.stem.endswith("_origin"):
+        return True
+    sibling = path.parent / f"{path.stem}_origin{path.suffix}"
+    return sibling.exists()
 
 
 def compress_one(
@@ -80,13 +94,26 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Recursively compress images in a folder without changing dimensions.",
     )
-    p.add_argument("input_dir", type=Path, help="Folder containing images to compress")
+    p.add_argument(
+        "input_paths",
+        type=str,
+        nargs="+",
+        help=(
+            "One or more image files, folders, or glob patterns "
+            "(e.g. '*.jpg'). Patterns are expanded by the program, so they "
+            "work on shells that don't auto-expand wildcards (Windows cmd)."
+        ),
+    )
     p.add_argument(
         "-o",
         "--output",
         type=Path,
         default=None,
-        help="Output folder (default: <input_dir>_compressed)",
+        help=(
+            "Output folder (for folder input, default: <input>_compressed) "
+            "or output file path (for single file input, default: "
+            "<input_stem>_compressed<ext> next to source)"
+        ),
     )
     p.add_argument(
         "-q",
@@ -125,34 +152,169 @@ def main() -> int:
         format="%(levelname)s: %(message)s",
     )
 
-    in_root: Path = args.input_dir
-    if not in_root.is_dir():
-        logger.error("Input folder does not exist: %s", in_root)
-        return 1
-
     if not 1 <= args.quality <= 100:
         logger.error("--quality must be between 1 and 100")
         return 1
 
-    out_root: Path = args.output or in_root.parent / f"{in_root.name}_compressed"
+    # Expand glob patterns (Windows shell does not auto-expand) and dedupe.
+    # For glob-expanded paths only, skip files that look already-processed:
+    #   - the file itself is a backup (stem ends with _origin)
+    #   - a sibling <stem>_origin<ext> backup already exists
+    expanded: list[Path] = []
+    seen: set[Path] = set()
+    for raw in args.input_paths:
+        from_glob = glob.has_magic(raw)
+        if from_glob:
+            matches = glob.glob(raw, recursive=True)
+            if not matches:
+                logger.error("No files matched pattern: %s", raw)
+                return 1
+            candidates = [Path(m) for m in matches]
+        else:
+            candidates = [Path(raw)]
+        for c in candidates:
+            if from_glob and c.is_file() and is_already_processed(c):
+                logger.info("Skipping already-processed file: %s", c)
+                continue
+            try:
+                key = c.resolve()
+            except OSError:
+                key = c
+            if key not in seen:
+                seen.add(key)
+                expanded.append(c)
 
-    if not args.dry_run:
-        try:
-            out_root.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            logger.error("Failed to create output folder %s: %s", out_root, exc)
+    # If glob expansion filtered everything out, there's nothing to do.
+    if not expanded:
+        print("Nothing to do: all matched files already processed.")
+        return 0
+
+    # Folder mode: exactly one input that resolves to a directory.
+    if len(expanded) == 1 and expanded[0].is_dir():
+        in_path: Path = expanded[0]
+    elif all(p.is_file() for p in expanded):
+        # File mode (one or more files).
+        if args.output is not None and len(expanded) > 1:
+            logger.error("--output cannot be combined with multiple input files")
             return 1
+        sources: list[tuple[Path, Path, bool]] = []
+        for in_file in expanded:
+            if in_file.suffix.lower() not in SUPPORTED_EXTENSIONS:
+                logger.error("Unsupported file extension: %s", in_file.suffix)
+                return 1
+            if args.output is not None:
+                sources.append((in_file, args.output, False))
+                continue
+            origin_file = in_file.parent / f"{in_file.stem}_origin{in_file.suffix}"
+            if origin_file.exists():
+                logger.error(
+                    "Backup file already exists: %s (refusing to overwrite)",
+                    origin_file,
+                )
+                return 1
+            if args.dry_run:
+                sources.append((in_file, in_file, False))
+            else:
+                try:
+                    shutil.move(str(in_file), str(origin_file))
+                except OSError as exc:
+                    logger.error("Failed to set up in-place compression: %s", exc)
+                    return 1
+                sources.append((origin_file, in_file, False))
+        # Skip the folder branch entirely.
+        in_path = None  # type: ignore[assignment]
+    else:
+        for p in expanded:
+            if not p.exists():
+                logger.error("Input path does not exist: %s", p)
+                return 1
+        logger.error("Cannot mix files and directories in a single invocation")
+        return 1
+
+    if in_path is not None and in_path.is_dir():
+        if args.output is not None:
+            # explicit output dir: leave original folder untouched
+            out_root: Path = args.output
+            src_root: Path = in_path
+            if not args.dry_run:
+                try:
+                    out_root.mkdir(parents=True, exist_ok=True)
+                except OSError as exc:
+                    logger.error("Failed to create output folder %s: %s", out_root, exc)
+                    return 1
+            sources = [
+                (src, mirror_path(src, src_root, out_root), is_already_processed(src))
+                for src in iter_images(src_root)
+            ]
+        else:
+            origin_root = in_path.parent / f"{in_path.name}_origin"
+            if origin_root.exists():
+                # RESUME MODE: per-file backup for files not yet processed.
+                sources = []
+                for src in iter_images(in_path):
+                    relative = src.relative_to(in_path)
+                    backup = origin_root / relative
+                    if backup.exists() or is_already_processed(src):
+                        # already processed in a prior run -- leave in place
+                        sources.append((src, src, True))
+                        continue
+                    if args.dry_run:
+                        sources.append((src, src, False))
+                        continue
+                    try:
+                        backup.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(src, backup)
+                    except OSError as exc:
+                        logger.warning("Failed to back up %s: %s", src, exc)
+                        sources.append((src, src, True))
+                        continue
+                    # compress_one will read from backup and write back to src
+                    sources.append((backup, src, False))
+            else:
+                # FIRST-RUN MODE: rename folder, write back to in_path
+                if args.dry_run:
+                    src_root = in_path
+                    out_root = in_path
+                else:
+                    try:
+                        shutil.move(str(in_path), str(origin_root))
+                        in_path.mkdir(parents=True, exist_ok=True)
+                    except OSError as exc:
+                        logger.error("Failed to set up in-place compression: %s", exc)
+                        return 1
+                    src_root = origin_root
+                    out_root = in_path
+                sources = [
+                    (src, mirror_path(src, src_root, out_root), is_already_processed(src))
+                    for src in iter_images(src_root)
+                ]
 
     processed = 0
     skipped = 0
+    passed_through = 0
     total_original = 0
     total_new = 0
 
-    for src in iter_images(in_root):
-        dst = mirror_path(src, in_root, out_root)
+    for src, dst, passthrough in sources:
         if args.dry_run:
-            logger.debug("Would compress %s -> %s", src, dst)
-            processed += 1
+            if passthrough:
+                logger.debug("Would pass through %s -> %s", src, dst)
+                passed_through += 1
+            else:
+                logger.debug("Would compress %s -> %s", src, dst)
+                processed += 1
+            continue
+        if passthrough:
+            if src.resolve() != dst.resolve():
+                try:
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dst)
+                except OSError as exc:
+                    logger.warning("Failed to pass through %s: %s", src, exc)
+                    skipped += 1
+                    continue
+            logger.info("Passed through (already processed): %s", src.name)
+            passed_through += 1
             continue
         try:
             original, new = compress_one(
@@ -179,11 +341,16 @@ def main() -> int:
         )
 
     if args.dry_run:
-        print(f"Dry run: {processed} file(s) would be processed.")
+        msg = f"Dry run: {processed} file(s) would be processed."
+        if passed_through:
+            msg += f" {passed_through} would be passed through."
+        print(msg)
     else:
         saved = total_original - total_new
         pct = (saved / total_original * 100) if total_original else 0.0
         print(f"Processed: {processed} files")
+        if passed_through:
+            print(f"Passed through (already processed): {passed_through} files")
         print(f"Skipped:   {skipped} files")
         print(f"Original size:   {_format_bytes(total_original)}")
         print(f"Compressed size: {_format_bytes(total_new)}")
