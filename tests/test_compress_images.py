@@ -19,6 +19,39 @@ def test_iter_images_skips_unsupported(sample_tree: Path) -> None:
     assert "notes.txt" not in found
 
 
+def test_iter_images_skips_symlinks(tmp_path: Path) -> None:
+    real = tmp_path / "real.jpg"
+    Image.new("RGB", (100, 100), (10, 20, 30)).save(real, "JPEG")
+    link = tmp_path / "link.jpg"
+    try:
+        link.symlink_to(real)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported in this environment")
+
+    found = [p.name for p in ci.iter_images(tmp_path)]
+    assert "real.jpg" in found
+    assert "link.jpg" not in found
+
+
+def test_module_sets_explicit_decompression_bomb_limit() -> None:
+    # The module should pin its own explicit limit, not rely on Pillow defaults.
+    assert ci.MAX_IMAGE_PIXELS_LIMIT == 100_000_000
+    assert Image.MAX_IMAGE_PIXELS == ci.MAX_IMAGE_PIXELS_LIMIT
+
+
+def test_compress_one_rejects_decompression_bomb(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = tmp_path / "big.jpg"
+    Image.new("RGB", (200, 200), (10, 20, 30)).save(src, "JPEG")
+    # Lower the limit so the 200x200 image counts as a "bomb"
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 100)
+
+    dst = tmp_path / "out.jpg"
+    with pytest.raises(Image.DecompressionBombError):
+        ci.compress_one(src, dst, quality=85, png_optimize=True)
+
+
 def test_mirror_path_top_level(tmp_path: Path) -> None:
     in_root = tmp_path / "in"
     out_root = tmp_path / "out"

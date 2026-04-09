@@ -15,10 +15,23 @@ logger = logging.getLogger("compress_images")
 
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
+# Cap Pillow's decompression-bomb limit to a sane value (100 megapixels).
+# Pillow's default is ~178MP; pinning an explicit, smaller limit narrows the
+# DoS surface when processing untrusted images.
+MAX_IMAGE_PIXELS_LIMIT = 100_000_000
+Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS_LIMIT
+
 
 def iter_images(root: Path) -> Iterator[Path]:
-    """Yield image files under `root` whose extension is supported."""
+    """Yield image files under `root` whose extension is supported.
+
+    Symbolic links are skipped to avoid following links out of the input tree
+    (which could leak files from elsewhere into the backup or output).
+    """
     for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            logger.debug("Skipping symlink: %s", path)
+            continue
         if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS:
             yield path
 
